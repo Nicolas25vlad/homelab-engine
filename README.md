@@ -17,12 +17,12 @@ python3 scripts/homelab.py apply
 python3 scripts/homelab.py secrets
 ```
 
-`inventory` and `plan` do not change the host. `inventory --save` writes a snapshot into the private repository; snapshots contain host and workload metadata, never environment values. `apply` only acts on services marked `managed: true` with an existing checked-in `source_file`, and supports start/stop while preserving volumes and files. `archived` has the same runtime effect as `stopped`; it never means delete.
+`inventory` and `plan` do not change the host. `inventory --save` writes a snapshot into the private repository; snapshots contain host and workload metadata, never environment values. `apply` only acts on services marked `managed: true` with a checked-in `source_file`. It starts, stops, or updates only the declared Compose service, preserves named volumes and host `.env` files, and restores the previous Compose file if an update fails. `archived` has the same runtime effect as `stopped`; it never means delete.
 
-Domains use `domains/<name>/domain.json` and are checked against [`schemas/domain.schema.json`](schemas/domain.schema.json). Set a service to `managed: true` only after its checked-in configuration matches the host. Unmanaged services are reported without action.
+Domains use `domains/<name>/domain.json` and are checked against [`schemas/domain.schema.json`](schemas/domain.schema.json). To add a Compose service, create its Compose YAML under the private config's `domains/<name>/`, then add a service entry with `kind: "compose"`, `managed: true`, the container `runtime_id`, host `compose_file`, exact `compose_service`, and Git-relative `source_file`. The host directory containing `compose_file` must already exist. Provision any required `.env` file on the host and declare its required key names; never commit secret values. Run `validate` and review `plan` before dispatching `apply`. A missing service is started from its checked-in Compose file; a changed file on a running service appears as `update` in the plan. Set an adopted service to `managed: true` only after its checked-in configuration matches the host. Unmanaged services are reported without action.
 
 ## Limits
 
-The engine does not install packages, change network/firewall/SSH settings, rotate secrets, remove containers or volumes, or perform backups. Secret checks report variable names and presence only. There is no automatic rollback; restore a known-good Compose/systemd definition manually if a managed change fails.
+The engine does not install packages, change network/firewall/SSH settings, rotate secrets, remove containers or volumes, or perform backups. Secret checks report variable names and presence only. Compose file changes roll back when `docker compose up` fails; systemd changes do not have automatic rollback.
 
 Run checks with `python -m unittest discover -s tests`. The current workflows validate the engine only; deployment-specific validation runs against the private configuration checkout.
