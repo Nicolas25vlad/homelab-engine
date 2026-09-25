@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:homelab:domain:v1",
+  "title": "Homelab domain",
+  "type": "object",
+  "required": ["apiVersion", "name", "state", "managed", "description", "services"],
+  "properties": {
+    "apiVersion": {"const": "homelab.v1"},
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "state": {"enum": ["running", "stopped", "archived"]},
+    "managed": {"type": "boolean"},
+    "description": {"type": "string", "minLength": 1},
+    "resources": {
+      "type": "object",
+      "properties": {
+        "memory_mib": {"$ref": "#/$defs/resource"},
+        "cpu_cores": {"$ref": "#/$defs/resource"}
+      },
+      "additionalProperties": false
+    },
+    "secrets": {"$ref": "#/$defs/secretSet"},
+    "services": {"type": "array", "items": {"$ref": "#/$defs/service"}}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "secretSet": {
+      "type": "object",
+      "required": ["provider", "path", "required", "optional"],
+      "properties": {
+        "provider": {"enum": ["infisical", "env-file", "none", "unknown"]},
+        "path": {"type": ["string", "null"]},
+        "required": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}, "uniqueItems": true},
+        "optional": {"type": "array", "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}, "uniqueItems": true}
+      },
+      "allOf": [
+        {"if": {"properties": {"provider": {"const": "env-file"}}}, "then": {"properties": {"path": {"type": "string", "pattern": "^/"}}}},
+        {"if": {"properties": {"provider": {"const": "infisical"}}}, "then": {"properties": {"path": {"type": "string", "pattern": "^/"}}}}
+      ],
+      "additionalProperties": false
+    },
+    "resource": {
+      "type": "object",
+      "required": ["reserved", "limit"],
+      "properties": {
+        "reserved": {"type": ["number", "null"], "minimum": 0},
+        "limit": {"type": ["number", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "service": {
+      "type": "object",
+      "required": ["name", "kind", "runtime_id", "managed"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+        "kind": {"enum": ["compose", "systemd"]},
+        "runtime_id": {"type": "string", "minLength": 1},
+        "managed": {"type": "boolean"},
+        "state": {"enum": ["running", "stopped", "archived"]},
+        "compose_file": {"type": "string", "pattern": "^/"},
+        "compose_service": {"type": "string"},
+        "source_file": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+"},
+        "unit": {"type": "string", "pattern": "^[a-zA-Z0-9@_.-]+\\.(service|timer|socket)$"},
+        "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}, "uniqueItems": true},
+        "persistent_data": {"type": "array", "items": {"type": "string"}},
+        "observed_memory_mib": {"type": ["number", "null"], "minimum": 0},
+        "secrets": {"$ref": "#/$defs/secretSet"},
+        "notes": {"type": "string"}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "compose"}}}, "then": {"required": ["compose_file", "compose_service"]}},
+        {"if": {"properties": {"kind": {"const": "systemd"}}}, "then": {"required": ["unit"]}},
+        {"if": {"properties": {"managed": {"const": true}}}, "then": {"required": ["source_file"]}}
+      ],
+      "additionalProperties": false
+    }
+  }
+}

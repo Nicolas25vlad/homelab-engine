@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -s tests
+      - run: python -m py_compile scripts/homelab.py scripts/remote_inventory.py scripts/remote_apply.py scripts/remote_secrets.py
+      - run: python -c 'import json; from pathlib import Path; [json.loads(p.read_text()) for p in Path(".").rglob("*.json")]'

@@ -1,0 +1,18 @@
+{
+  "apiVersion": "homelab.v1",
+  "name": "example",
+  "state": "running",
+  "managed": false,
+  "description": "Example domain; discovered services stay unmanaged until adopted.",
+  "resources": {
+    "memory_mib": {"reserved": 0, "limit": null},
+    "cpu_cores": {"reserved": 0, "limit": null}
+  },
+  "secrets": {
+    "provider": "none",
+    "path": null,
+    "required": [],
+    "optional": []
+  },
+  "services": []
+}
