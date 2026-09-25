@@ -48,6 +48,14 @@ class PlanTests(unittest.TestCase):
         row = homelab.service_action(domain, service, self.actual)
         self.assertEqual((row["action"], row["result"]), ("update", "update"))
 
+    def test_missing_managed_compose_service_starts(self):
+        domain = {"name": "app", "state": "running"}
+        service = {"name": "app", "kind": "compose", "runtime_id": "app-1", "compose_file": "/srv/app/compose.yaml", "compose_service": "app", "managed": True}
+        self.actual["docker"]["containers"] = []
+        self.actual["compose_files"] = {"/srv/app/compose.yaml": {"expected": "new", "actual": None}}
+        row = homelab.service_action(domain, service, self.actual)
+        self.assertEqual((row["action"], row["result"]), ("start", "start"))
+
     def test_compose_file_drift_waits_until_a_stopped_service_starts(self):
         domain = {"name": "app", "state": "stopped"}
         service = {"name": "db", "kind": "compose", "runtime_id": "db", "compose_file": "/srv/db/compose.yaml", "compose_service": "db", "managed": True}
@@ -113,22 +121,27 @@ class SchemaTests(unittest.TestCase):
 
 
 class ComposeApplyTests(unittest.TestCase):
-    def run_apply(self, action, docker_status=0):
+    def run_apply(self, action, docker_status=0, action_name="update", existing=True):
         real_run = subprocess.run
+        events = []
 
         def fake_run(command, **kwargs):
             if command[:3] == ["sudo", "-n", "python3"]:
-                return real_run([sys.executable, *command[3:]], **kwargs)
+                result = real_run([sys.executable, *command[3:]], **kwargs)
+                events.append("write")
+                return result
+            events.append("docker")
             return subprocess.CompletedProcess(command, docker_status)
 
         with tempfile.TemporaryDirectory() as directory:
             compose_file = Path(directory) / "compose.yaml"
-            compose_file.write_text("services: {}\n", encoding="utf-8")
-            compose_file.chmod(0o640)
+            if existing:
+                compose_file.write_text("services: {}\n", encoding="utf-8")
+                compose_file.chmod(0o640)
             action.update({
                 "managed": True,
                 "kind": "compose",
-                "action": "update",
+                "action": action_name,
                 "compose_file": str(compose_file),
                 "compose_service": "app",
                 "compose_content": "services:\n  app:\n    image: alpine\n",
@@ -143,17 +156,25 @@ class ComposeApplyTests(unittest.TestCase):
                         remote_apply.main()
                 else:
                     remote_apply.main()
-            return compose_file.read_text(encoding="utf-8"), compose_file.stat().st_mode & 0o777
+            return compose_file.read_text(encoding="utf-8"), compose_file.stat().st_mode & 0o777, events
 
     def test_compose_update_writes_new_file_and_preserves_mode(self):
-        content, mode = self.run_apply({})
+        content, mode, events = self.run_apply({})
         self.assertIn("image: alpine", content)
         self.assertEqual(mode, 0o640)
+        self.assertEqual(events, ["write", "docker"])
+
+    def test_compose_start_creates_file_before_starting_service(self):
+        content, mode, events = self.run_apply({}, action_name="start", existing=False)
+        self.assertIn("image: alpine", content)
+        self.assertEqual(mode, 0o644)
+        self.assertEqual(events, ["write", "docker"])
 
     def test_failed_compose_update_restores_previous_file(self):
-        content, mode = self.run_apply({}, docker_status=1)
+        content, mode, events = self.run_apply({}, docker_status=1)
         self.assertEqual(content, "services: {}\n")
         self.assertEqual(mode, 0o640)
+        self.assertEqual(events, ["write", "docker", "write"])
 
 
 if __name__ == "__main__":
