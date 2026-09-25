@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -71,6 +72,8 @@ def load_model(config):
                 source = (config / service["source_file"]).resolve()
                 if config.resolve() not in source.parents or not source.is_file():
                     raise ValueError(f"{path}: managed service source_file is missing or outside config: {service['source_file']}")
+                if SECRET_VALUE.search(source.read_text(encoding="utf-8")):
+                    raise ValueError(f"{source}: looks like a secret value; use a host-side env file")
         if SECRET_VALUE.search(path.read_text(encoding="utf-8")):
             raise ValueError(f"{path}: looks like a secret value; declare names only")
         domains.append(domain)
@@ -165,21 +168,45 @@ def actual_state(service, actual):
     return {"active": "running", "running": "running", "failed": "failed", "inactive": "stopped", "dead": "stopped", "exited": "stopped"}.get(value, value)
 
 
+def compose_hashes(hosts, domains, config):
+    files = {}
+    for domain in domains:
+        for service in domain["services"]:
+            if service["managed"] and service["kind"] == "compose":
+                content = (config / service["source_file"]).read_bytes()
+                files[service["compose_file"]] = hashlib.sha256(content).hexdigest()
+    source = (ENGINE / "scripts" / "remote_compose.py").read_text(encoding="utf-8")
+    result = subprocess.run(
+        ["ssh", "-T", hosts["host"]["ssh_target"], remote_python_command(source)],
+        input=json.dumps(list(files)), text=True, capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise ValueError(result.stderr.strip() or "remote Compose check failed")
+    try:
+        remote = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ValueError("remote Compose check returned invalid JSON") from exc
+    return {path: {"expected": digest, "actual": remote.get(path)} for path, digest in files.items()}
+
+
 def service_action(domain, service, actual):
     desired = service.get("state", domain["state"])
     observed = actual_state(service, actual)
     if not service["managed"]:
         return {"domain": domain["name"], "service": service["name"], "kind": service["kind"], "runtime_id": service["runtime_id"], "managed": False, "desired": desired, "actual": observed, "action": "none", "result": "unmanaged", **{key: service[key] for key in ("compose_file", "compose_service", "unit", "source_file") if key in service}}
     should_run = desired == "running"
+    compose = service["kind"] == "compose"
+    compose_file = actual.get("compose_files", {}).get(service.get("compose_file"), {})
+    config_drift = compose and compose_file.get("expected") != compose_file.get("actual")
     enabled = service["kind"] == "systemd" and service["unit"] in actual["systemd"]["enabled_units"]
     needs_start = observed != "running" or (service["kind"] == "systemd" and not enabled)
     needs_stop = observed == "running" or (service["kind"] == "systemd" and enabled)
-    action = "start" if should_run and needs_start else "stop" if not should_run and needs_stop else "none"
+    action = "start" if should_run and needs_start else "update" if should_run and compose and config_drift else "stop" if not should_run and needs_stop else "none"
     if action != "none" and service["kind"] == "systemd" and service["unit"] in PROTECTED_UNITS:
         action = "none"
         result = "manual-review"
     else:
-        result = action if action != "none" else "unchanged"
+        result = action if action != "none" else "config-drift" if config_drift else "unchanged"
     return {"domain": domain["name"], "service": service["name"], "kind": service["kind"], "runtime_id": service["runtime_id"], "managed": True, "desired": desired, "actual": observed, "action": action, "result": result, **{key: service[key] for key in ("compose_file", "compose_service", "unit", "source_file") if key in service}}
 
 
@@ -189,7 +216,7 @@ def make_plan(domains, actual):
     unknown = [item["name"] for item in actual["docker"]["containers"] if item["name"] not in declared]
     declared_units = {row["unit"] for row in rows if row["kind"] == "systemd"}
     unknown_units = [unit for unit in actual["systemd"].get("custom_units", []) if unit not in declared_units]
-    return {"services": rows, "unknown_containers": unknown, "unknown_systemd_units": unknown_units, "summary": {"start": sum(row["action"] == "start" for row in rows), "stop": sum(row["action"] == "stop" for row in rows), "unchanged": sum(row["result"] == "unchanged" for row in rows), "unmanaged": sum(row["result"] == "unmanaged" for row in rows), "manual_review": sum(row["result"] == "manual-review" for row in rows), "unknown": len(unknown) + len(unknown_units), "destructive": 0}}
+    return {"services": rows, "unknown_containers": unknown, "unknown_systemd_units": unknown_units, "summary": {"start": sum(row["action"] == "start" for row in rows), "update": sum(row["action"] == "update" for row in rows), "stop": sum(row["action"] == "stop" for row in rows), "unchanged": sum(row["result"] == "unchanged" for row in rows), "unmanaged": sum(row["result"] == "unmanaged" for row in rows), "manual_review": sum(row["result"] == "manual-review" for row in rows), "config_drift": sum(row["result"] == "config-drift" for row in rows), "unknown": len(unknown) + len(unknown_units), "destructive": 0}}
 
 
 def show_inventory(actual, as_json=False):
@@ -217,7 +244,7 @@ def show_inventory(actual, as_json=False):
 
 
 def make_actions(plan):
-    return [row for row in plan["services"] if row["action"] in {"start", "stop"}]
+    return [row for row in plan["services"] if row["action"] in {"start", "update", "stop"}]
 
 
 def print_plan(plan):
@@ -229,7 +256,7 @@ def print_plan(plan):
     for unit in plan["unknown_systemd_units"]:
         print(f"unknown systemd unit: {unit} (potential unmanaged workload)")
     summary = plan["summary"]
-    print(f"SUMMARY: {summary['start']} start, {summary['stop']} stop, {summary['unchanged']} unchanged, {summary['unmanaged']} unmanaged, {summary['manual_review']} manual review, {summary['unknown']} unknown, {summary['destructive']} destructive")
+    print(f"SUMMARY: {summary['start']} start, {summary['update']} update, {summary['stop']} stop, {summary['unchanged']} unchanged, {summary['config_drift']} deferred config drift, {summary['unmanaged']} unmanaged, {summary['manual_review']} manual review, {summary['unknown']} unknown, {summary['destructive']} destructive")
 
 
 def main():
@@ -278,6 +305,7 @@ def main():
                 target.write_text(json.dumps(actual, indent=2) + "\n", encoding="utf-8")
                 print(f"snapshot saved: {target}")
             return 0
+        actual["compose_files"] = compose_hashes(hosts, domains, config)
         plan = make_plan(domains, actual)
         print_plan(plan)
         if args.command == "plan":
@@ -286,7 +314,7 @@ def main():
         if not actions:
             print("No managed service changes to apply.")
             return 0
-        starts = {row["domain"] + "/" + row["service"] for row in actions if row["action"] == "start"}
+        starts = {row["domain"] + "/" + row["service"] for row in actions if row["action"] in {"start", "update"}}
         requests, unchecked = secret_declarations(domains, starts)
         if unchecked:
             raise ValueError("refusing start until secret providers are configured: " + ", ".join(identifier for identifier, _ in unchecked))
@@ -299,6 +327,9 @@ def main():
                 secret_set = service.get("secrets", domain.get("secrets", {"provider": "none"}))
                 if not secrets_ready(secret_set, reports.get(identifier, {})):
                     raise ValueError(f"refusing start because required secret keys are missing or unreadable: {identifier}")
+        for row in actions:
+            if row["kind"] == "compose":
+                row["compose_content"] = (config / row["source_file"]).read_text(encoding="utf-8")
         source = (ENGINE / "scripts" / "remote_apply.py").read_text(encoding="utf-8")
         result = subprocess.run(
             ["ssh", "-T", hosts["host"]["ssh_target"], remote_python_command(source)],
@@ -314,6 +345,7 @@ def main():
         if result.stderr:
             print(result.stderr, end="", file=sys.stderr)
         actual = remote_json(hosts, "remote_inventory.py")
+        actual["compose_files"] = compose_hashes(hosts, domains, config)
         verified = make_plan(domains, actual)
         failed = [row for row in verified["services"] if row["domain"] + "/" + row["service"] in {item["domain"] + "/" + item["service"] for item in actions} and row["result"] not in {"unchanged", "unmanaged"}]
         if failed:
