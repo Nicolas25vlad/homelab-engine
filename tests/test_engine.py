@@ -1,11 +1,18 @@
+import contextlib
+import io
+import json
 import sys
 import shlex
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import homelab
 import remote_inventory
+import remote_apply
 
 
 class PlanTests(unittest.TestCase):
@@ -103,6 +110,50 @@ class SchemaTests(unittest.TestCase):
         domain = homelab.load_json(root / "examples" / "domain.json")
         domain["services"] = [{"name": "db", "kind": "compose", "runtime_id": "db", "managed": True, "compose_file": "/srv/db/compose.yaml", "compose_service": "db"}]
         self.assertTrue(list(Draft202012Validator(schema).iter_errors(domain)))
+
+
+class ComposeApplyTests(unittest.TestCase):
+    def run_apply(self, action, docker_status=0):
+        real_run = subprocess.run
+
+        def fake_run(command, **kwargs):
+            if command[:3] == ["sudo", "-n", "python3"]:
+                return real_run([sys.executable, *command[3:]], **kwargs)
+            return subprocess.CompletedProcess(command, docker_status)
+
+        with tempfile.TemporaryDirectory() as directory:
+            compose_file = Path(directory) / "compose.yaml"
+            compose_file.write_text("services: {}\n", encoding="utf-8")
+            compose_file.chmod(0o640)
+            action.update({
+                "managed": True,
+                "kind": "compose",
+                "action": "update",
+                "compose_file": str(compose_file),
+                "compose_service": "app",
+                "compose_content": "services:\n  app:\n    image: alpine\n",
+                "domain": "test",
+                "service": "app",
+            })
+            with patch("remote_apply.subprocess.run", side_effect=fake_run), \
+                 patch("remote_apply.sys.stdin", io.StringIO(json.dumps([action]))), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                if docker_status:
+                    with self.assertRaises(SystemExit):
+                        remote_apply.main()
+                else:
+                    remote_apply.main()
+            return compose_file.read_text(encoding="utf-8"), compose_file.stat().st_mode & 0o777
+
+    def test_compose_update_writes_new_file_and_preserves_mode(self):
+        content, mode = self.run_apply({})
+        self.assertIn("image: alpine", content)
+        self.assertEqual(mode, 0o640)
+
+    def test_failed_compose_update_restores_previous_file(self):
+        content, mode = self.run_apply({}, docker_status=1)
+        self.assertEqual(content, "services: {}\n")
+        self.assertEqual(mode, 0o640)
 
 
 if __name__ == "__main__":
