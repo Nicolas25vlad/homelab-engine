@@ -172,7 +172,9 @@ def service_action(domain, service, actual):
         return {"domain": domain["name"], "service": service["name"], "kind": service["kind"], "runtime_id": service["runtime_id"], "managed": False, "desired": desired, "actual": observed, "action": "none", "result": "unmanaged", **{key: service[key] for key in ("compose_file", "compose_service", "unit", "source_file") if key in service}}
     should_run = desired == "running"
     enabled = service["kind"] == "systemd" and service["unit"] in actual["systemd"]["enabled_units"]
-    action = "start" if should_run and (observed != "running" or not enabled) else "stop" if not should_run and (observed == "running" or enabled) else "none"
+    needs_start = observed != "running" or (service["kind"] == "systemd" and not enabled)
+    needs_stop = observed == "running" or (service["kind"] == "systemd" and enabled)
+    action = "start" if should_run and needs_start else "stop" if not should_run and needs_stop else "none"
     if action != "none" and service["kind"] == "systemd" and service["unit"] in PROTECTED_UNITS:
         action = "none"
         result = "manual-review"
