@@ -27,6 +27,12 @@ class PlanTests(unittest.TestCase):
         row = homelab.service_action(domain, service, self.actual)
         self.assertEqual(row["action"], "start")
 
+    def test_running_compose_service_is_unchanged(self):
+        domain = {"name": "app", "state": "running"}
+        service = {"name": "db", "kind": "compose", "runtime_id": "db", "compose_file": "/srv/db/compose.yaml", "compose_service": "db", "managed": True}
+        row = homelab.service_action(domain, service, self.actual)
+        self.assertEqual((row["action"], row["result"]), ("none", "unchanged"))
+
     def test_protected_systemd_unit_requires_manual_review(self):
         domain = {"name": "core", "state": "stopped"}
         service = {"name": "ssh", "kind": "systemd", "runtime_id": "sshd.service", "unit": "sshd.service", "managed": True}
