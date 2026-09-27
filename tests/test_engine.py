@@ -123,6 +123,7 @@ class SchemaTests(unittest.TestCase):
 class ComposeApplyTests(unittest.TestCase):
     def run_apply(self, action, docker_status=0, action_name="update", existing=True):
         real_run = subprocess.run
+        real_unprivileged_write = remote_apply._replace_compose_unprivileged
         events = []
 
         def fake_run(command, **kwargs):
@@ -132,6 +133,10 @@ class ComposeApplyTests(unittest.TestCase):
                 return result
             events.append("docker")
             return subprocess.CompletedProcess(command, docker_status)
+
+        def fake_unprivileged_write(path, content, mode):
+            events.append("write")
+            return real_unprivileged_write(path, content, mode)
 
         with tempfile.TemporaryDirectory() as directory:
             compose_file = Path(directory) / "compose.yaml"
@@ -149,6 +154,10 @@ class ComposeApplyTests(unittest.TestCase):
                 "service": "app",
             })
             with patch("remote_apply.subprocess.run", side_effect=fake_run), \
+                 patch(
+                     "remote_apply._replace_compose_unprivileged",
+                     side_effect=fake_unprivileged_write,
+                 ), \
                  patch("remote_apply.sys.stdin", io.StringIO(json.dumps([action]))), \
                  contextlib.redirect_stdout(io.StringIO()):
                 if docker_status:
