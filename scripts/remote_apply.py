@@ -2,8 +2,10 @@
 """Apply only explicitly managed service start/stop actions; never delete data."""
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -49,10 +51,60 @@ def main():
 def _replace_compose(path, content):
     exists = path.exists()
     old = path.stat() if exists else path.parent.stat()
-    command = ["sudo", "-n", "python3", "-c", "import json,os,sys,tempfile; a=json.load(sys.stdin); p=a['path']; f=tempfile.NamedTemporaryFile(dir=os.path.dirname(p),delete=False); f.write(a['content'].encode()); f.flush(); os.fsync(f.fileno()); f.close(); os.chown(f.name,a['uid'],a['gid']); os.chmod(f.name,a['mode']); os.replace(f.name,p)"]
-    result = subprocess.run(command, input=json.dumps({"path": str(path), "content": content.decode("utf-8"), "uid": old.st_uid, "gid": old.st_gid, "mode": old.st_mode & 0o777 if exists else 0o644}), text=True, check=False)
+    mode = old.st_mode & 0o777 if exists else 0o644
+
+    if (
+        os.access(path.parent, os.W_OK)
+        and (not exists or old.st_uid == os.geteuid())
+    ):
+        _replace_compose_unprivileged(path, content, mode)
+        return
+
+    command = [
+        "sudo",
+        "-n",
+        "python3",
+        "-c",
+        (
+            "import json,os,sys,tempfile; "
+            "a=json.load(sys.stdin); p=a['path']; "
+            "f=tempfile.NamedTemporaryFile(dir=os.path.dirname(p),delete=False); "
+            "f.write(a['content'].encode()); f.flush(); os.fsync(f.fileno()); "
+            "f.close(); os.chown(f.name,a['uid'],a['gid']); "
+            "os.chmod(f.name,a['mode']); os.replace(f.name,p)"
+        ),
+    ]
+    result = subprocess.run(
+        command,
+        input=json.dumps(
+            {
+                "path": str(path),
+                "content": content.decode("utf-8"),
+                "uid": old.st_uid,
+                "gid": old.st_gid,
+                "mode": mode,
+            }
+        ),
+        text=True,
+        check=False,
+    )
     if result.returncode:
         raise subprocess.CalledProcessError(result.returncode, command)
+
+
+def _replace_compose_unprivileged(path, content, mode):
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
 
 
 if __name__ == "__main__":
